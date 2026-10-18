@@ -1,0 +1,44 @@
+# Deliberately broken workloads to try LensGuard. Remove with: kubectl delete ns lensguard-demo
+apiVersion: v1
+kind: Namespace
+metadata: {name: lensguard-demo}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: crashloop, namespace: lensguard-demo}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: crashloop}}
+  template:
+    metadata: {labels: {app: crashloop}}
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          command: ["sh", "-c", "echo 'DB_HOST not set, exiting'; exit 1"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: bad-image, namespace: lensguard-demo}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: bad-image}}
+  template:
+    metadata: {labels: {app: bad-image}}
+    spec:
+      containers:
+        - {name: app, image: "nginx:this-tag-does-not-exist"}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: unschedulable, namespace: lensguard-demo}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: unschedulable}}
+  template:
+    metadata: {labels: {app: unschedulable}}
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.27
+          resources: {requests: {cpu: "512", memory: 1Ti}}

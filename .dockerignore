@@ -1,0 +1,49 @@
+# Version control and CI
+.git
+.gitignore
+.github
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+kubeconfig
+*.kubeconfig
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Not needed inside the image
+k8s/
+samples/
+docker-compose.yml
+Dockerfile*
+README.md
+*.md
+*.log
+logs/
+mysql_data/
+db_data/
+trivy-report*.json
+scout-report*.json
+.scannerwork/
+
+# Node
+node_modules/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

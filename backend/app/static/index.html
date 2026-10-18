@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LensGuard</title>
+<style>
+:root{--navy:#0b2a4a;--blue:#1572d6;--teal:#0a8fb8;--ink:#14263b;--muted:#5b6b7e;--line:#dbe5ef;--bg:#f4f8fc;--panel:#fff;
+--ok:#2f9e5b;--warn:#e8a317;--bad:#d63a3a;--idle:#9aa7b5}
+@media (prefers-color-scheme:dark){:root{--navy:#cfe6ff;--ink:#e6eef7;--muted:#93a4b8;--line:#243a54;--bg:#0b1826;--panel:#102338;--teal:#3cc1e8;--blue:#5aa5ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{padding:20px 28px 8px;display:flex;flex-wrap:wrap;gap:12px 28px;align-items:baseline}
+h1{margin:0;font-size:30px;letter-spacing:-.02em;color:var(--navy)}h1 span{color:var(--teal)}
+.sub{color:var(--muted)}
+#status{margin-left:auto;font-size:13px;color:var(--muted)}
+main{padding:12px 28px 40px;display:grid;gap:18px;grid-template-columns:repeat(12,1fr)}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;min-width:0}
+h2{margin:0 0 12px;font-size:16px;color:var(--navy)}
+.pods{grid-column:span 4}.nodes{grid-column:span 4}.metrics{grid-column:span 4}.alerts,.reports{grid-column:span 12}
+@media(max-width:1000px){.pods,.nodes,.metrics{grid-column:span 12}}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px;background:var(--idle)}
+.Running{background:var(--ok)}.Pending{background:var(--warn)}.Succeeded{background:var(--idle)}.bad{background:var(--bad)}
+.counts div{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--line)}
+.counts b{font-variant-numeric:tabular-nums}
+.scroll{max-height:190px;overflow:auto;margin-top:10px;font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font-weight:600;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+.wrap{overflow-x:auto}
+.chip{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600;color:#fff}
+.chip.critical{background:var(--bad)}.chip.warning{background:var(--warn);color:#2b2100}.chip.info{background:var(--idle)}
+.chip.resolved{background:var(--ok)}
+.metric{margin-bottom:14px}.metric small{color:var(--muted)}
+svg.spark{width:100%;height:70px;display:block;background:linear-gradient(var(--bg),var(--bg));border-radius:6px}
+button,input[type=file]{font:inherit}
+button{background:var(--blue);color:#fff;border:0;border-radius:6px;padding:5px 12px;cursor:pointer}
+button.ghost{background:transparent;color:var(--blue);border:1px solid var(--line)}
+button:focus-visible,summary:focus-visible,select:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
+button:disabled{opacity:.5;cursor:wait}
+details summary{cursor:pointer;color:var(--blue)}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);padding:8px 10px;border-radius:6px;font-size:12px;max-height:200px;overflow:auto}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.empty{color:var(--muted);padding:10px 0}
+.err{color:var(--bad)}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Lens<span>Guard</span></h1>
+  <div class="sub">Monitor clusters. Detect risks. Debug smarter.</div>
+  <div id="status" role="status">Connecting…</div>
+</header>
+<main>
+  <section class="pods"><h2>Pod status</h2><div class="counts" id="podCounts"></div><div class="scroll" id="podList"></div></section>
+  <section class="nodes"><h2>Nodes</h2><div class="wrap"><table id="nodeTable"></table></div></section>
+  <section class="metrics"><h2>Cluster metrics</h2><div id="metrics"></div></section>
+  <section class="alerts">
+    <div class="row"><h2 style="margin:0">Alerts</h2>
+      <select id="alertFilter" aria-label="Filter alerts"><option value="open">Open</option><option value="">All</option><option value="resolved">Resolved</option></select>
+    </div>
+    <div class="wrap" id="alerts"></div>
+  </section>
+  <section class="reports">
+    <h2>Security reports</h2>
+    <div class="row">
+      <input type="file" id="reportFile" accept=".json,.sarif" aria-label="Report file">
+      <button id="importBtn">Import report</button>
+      <span class="sub">Trivy JSON, Docker Scout SARIF or SonarQube issues JSON</span>
+      <span id="importMsg" role="status"></span>
+    </div>
+    <div class="wrap" id="reports"></div>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let health = {};
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || r.statusText);
+  return body;
+}
+const ago = iso => { if (!iso) return "-"; const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+  return s < 90 ? Math.round(s) + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : s < 129600 ? Math.round(s / 3600) + "h ago" : Math.round(s / 86400) + "d ago"; };
+const dotClass = st => ["Running","Pending","Succeeded"].includes(st) ? st : "bad";
+
+function spark(values, max, color) {
+  if (values.length < 2) return '<div class="empty">Collecting data…</div>';
+  const w = 300, h = 70, top = max || Math.max(...values, 1);
+  const pts = values.map((v, i) => `${(i / (values.length - 1) * w).toFixed(1)},${(h - 4 - Math.min(v, top) / top * (h - 8)).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+async function loadHealth() {
+  try {
+    health = await api("/api/health");
+    const el = $("#status");
+    if (health.collector_error) el.innerHTML = `<span class="err">Cluster unreachable: ${esc(health.collector_error)}</span>`;
+    else el.textContent = health.last_collection ? "Last collected " + ago(health.last_collection) : "Waiting for first collection…";
+  } catch (e) { $("#status").innerHTML = `<span class="err">API unreachable</span>`; }
+}
+
+async function loadPods() {
+  const [ov, pods] = await Promise.all([api("/api/overview"), api("/api/pods")]);
+  const groups = {Running: 0, Pending: 0, Succeeded: 0, Failing: 0};
+  pods.forEach(p => groups[["Running","Pending","Succeeded"].includes(p.status) ? p.status : "Failing"]++);
+  $("#podCounts").innerHTML = Object.entries(groups).map(([k, v]) =>
+    `<div><span><span class="dot ${k === "Failing" ? "bad" : k}"></span>${k}</span><b>${v}</b></div>`).join("");
+  const bad = pods.filter(p => !["Running","Succeeded"].includes(p.status));
+  $("#podList").innerHTML = bad.length ? bad.map(p =>
+    `<div><span class="dot ${dotClass(p.status)}"></span>${esc(p.namespace)}/${esc(p.name)} <span class="sub">${esc(p.status)}</span></div>`).join("")
+    : '<div class="empty">No pods need attention.</div>';
+}
+
+async function loadNodes() {
+  const nodes = await api("/api/nodes");
+  const pct = (u, a) => u == null || !a ? "-" : Math.round(u / a * 100) + "%";
+  $("#nodeTable").innerHTML = nodes.length
+    ? `<tr><th>Name</th><th>Ready</th><th>CPU</th><th>Memory</th></tr>` + nodes.map(n =>
+      `<tr><td>${esc(n.name)}</td><td>${n.ready ? "✓ Ready" : '<span class="err">Not ready</span>'}</td><td>${pct(n.cpu_m, n.cpu_alloc_m)}</td><td>${pct(n.mem_mi, n.mem_alloc_mi)}</td></tr>`).join("")
+    : '<tr><td class="empty">No nodes collected yet.</td></tr>';
+}
+
+async function loadMetrics() {
+  const m = await api("/api/metrics?minutes=60");
+  if (health.metrics_available === false) { $("#metrics").innerHTML = '<div class="empty">metrics-server is not installed in this cluster, so CPU and memory are unavailable.</div>'; return; }
+  const last = m[m.length - 1];
+  $("#metrics").innerHTML =
+    `<div class="metric"><small>CPU usage ${last ? Math.round(last.cpu_pct) + "%" : ""}</small>${spark(m.map(x => x.cpu_pct), 100, "#1572d6")}</div>` +
+    `<div class="metric"><small>Memory usage ${last ? Math.round(last.mem_pct) + "%" : ""}</small>${spark(m.map(x => x.mem_pct), 100, "#0a8fb8")}</div>`;
+}
+
+async function loadAlerts() {
+  const f = $("#alertFilter").value;
+  const alerts = await api("/api/alerts" + (f ? "?status=" + f : ""));
+  if (!alerts.length) { $("#alerts").innerHTML = '<div class="empty">No alerts. Everything looks healthy.</div>'; return; }
+  $("#alerts").innerHTML = `<table><tr><th>Severity</th><th>Alert</th><th>Seen</th><th>Details</th></tr>` + alerts.map(a => `
+    <tr><td><span class="chip ${a.status === "resolved" ? "resolved" : a.severity}">${a.status === "resolved" ? "resolved" : esc(a.severity)}</span></td>
+    <td><b>${esc(a.title)}</b><br><span class="sub">${esc(a.resource)}</span></td>
+    <td>${a.count}× · ${ago(a.last_seen)}</td>
+    <td><details><summary>Show</summary>
+      <p>${esc(a.message)}</p>
+      <p><b>Next step:</b> ${esc(a.hint || "-")}</p>
+      ${a.context ? `<pre>${esc(a.context)}</pre>` : ""}
+      ${a.ai_explanation ? `<p><b>AI explanation</b></p><pre>${esc(a.ai_explanation)}</pre>`
+        : health.ai_enabled && a.status === "open" ? `<button class="ghost" data-explain="${a.id}">Explain with AI</button>` : ""}
+    </details></td></tr>`).join("") + "</table>";
+}
+
+async function loadReports() {
+  const r = await api("/api/reports");
+  $("#reports").innerHTML = r.length ? `<table><tr><th>Tool</th><th>Target</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Imported</th></tr>` +
+    r.map(x => `<tr><td>${esc(x.tool)}</td><td>${esc(x.target)}</td><td>${x.critical}</td><td>${x.high}</td><td>${x.medium}</td><td>${x.low}</td><td>${ago(x.created_at)}</td></tr>`).join("") + "</table>"
+    : '<div class="empty">No reports yet. Import a Trivy, Docker Scout or SonarQube report.</div>';
+}
+
+document.addEventListener("click", async e => {
+  const id = e.target.dataset.explain;
+  if (!id) return;
+  e.target.disabled = true; e.target.textContent = "Explaining…";
+  try { await api(`/api/alerts/${id}/explain`, {method: "POST"}); await loadAlerts(); }
+  catch (err) { e.target.disabled = false; e.target.textContent = "Explain with AI"; alert(err.message); }
+});
+$("#alertFilter").addEventListener("change", loadAlerts);
+$("#importBtn").addEventListener("click", async () => {
+  const file = $("#reportFile").files[0], msg = $("#importMsg");
+  if (!file) { msg.textContent = "Choose a report file first."; return; }
+  const fd = new FormData(); fd.append("file", file);
+  msg.textContent = "Importing…";
+  try { const r = await api("/api/reports/import", {method: "POST", body: fd});
+    msg.textContent = `Imported: ${r.critical} critical, ${r.high} high.`; refresh(); }
+  catch (err) { msg.innerHTML = `<span class="err">${esc(err.message)}</span>`; }
+});
+
+async function refresh() {
+  await loadHealth();
+  await Promise.allSettled([loadPods(), loadNodes(), loadMetrics(), loadAlerts(), loadReports()]);
+}
+refresh(); setInterval(refresh, 10000);
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: lensguard
+      MYSQL_USER: lensguard
+      MYSQL_PASSWORD: lensguard
+      MYSQL_ROOT_PASSWORD: change-me-root
+    ports: ["3306:3306"]
+    volumes: [dbdata:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ulensguard", "-plensguard"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./backend
+    image: manishvishwa801/lensguard:local
+    env_file: [{path: .env, required: false}]
+    environment:
+      DATABASE_URL: mysql+pymysql://lensguard:lensguard@db:3306/lensguard
+      KUBECONFIG: /kube/config
+    volumes:
+      - ${KUBECONFIG_PATH:-~/.kube/config}:/kube/config:ro
+    ports: ["8000:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+
+volumes:
+  dbdata:
