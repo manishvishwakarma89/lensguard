@@ -4,9 +4,19 @@ on:
   pull_request:
 
 jobs:
-  test:
+    permissions:
+    contents: read
+    test:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: trivy-report, path: trivy-report.json}
+      - name: Send report to LensGuard (optional)
+        if: ${{ vars.LENSGUARD_URL != '' }}
+        env:
+          LENSGUARD_URL: ${{ vars.LENSGUARD_URL }}
+        run: curl -fsS -F "file=@trivy-report.json" "$LENSGUARD_URL/api/reports/import"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12", cache: pip, cache-dependency-path: backend/requirements.txt}
