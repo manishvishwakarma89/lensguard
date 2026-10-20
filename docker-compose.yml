@@ -16,16 +16,27 @@ services:
 
   api:
     build: ./backend
+<<<<<<< HEAD
     image: manishvishwa801/lensguard:local
+=======
+>>>>>>> 483e478 (added github actions)
     env_file: [{path: .env, required: false}]
     environment:
       DATABASE_URL: mysql+pymysql://lensguard:lensguard@db:3306/lensguard
       KUBECONFIG: /kube/config
     volumes:
+<<<<<<< HEAD
       - ${KUBECONFIG_PATH:-~/.kube/config}:/kube/config:ro
+=======
+      - ./lensguard-kubeconfig:/kube/config:ro
+>>>>>>> 483e478 (added github actions)
     ports: ["8000:8000"]
     depends_on:
       db: {condition: service_healthy}
 
 volumes:
+<<<<<<< HEAD
   dbdata:
+=======
+  dbdata:
+>>>>>>> 483e478 (added github actions)

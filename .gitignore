@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Secrets and local config (keep .env.example committed)
 .env
 .env.*
@@ -48,3 +49,14 @@ build/
 .idea/
 .DS_Store
 Thumbs.db
+=======
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+lensguard-kubeconfig
+*kubeconfig*
+.~lock.*
+*.zip
+.env
+>>>>>>> 483e478 (added github actions)
