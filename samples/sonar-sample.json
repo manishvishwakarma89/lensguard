@@ -1,0 +1,40 @@
+{
+  "total": 3,
+  "p": 1,
+  "ps": 100,
+  "issues": [
+    {
+      "key": "demo-001",
+      "rule": "python:S2068",
+      "severity": "CRITICAL",
+      "component": "lensguard:app/config.py",
+      "project": "lensguard",
+      "line": 12,
+      "message": "Review this hard-coded password and load credentials from a secret store.",
+      "type": "VULNERABILITY",
+      "status": "OPEN"
+    },
+    {
+      "key": "demo-002",
+      "rule": "python:S1186",
+      "severity": "MAJOR",
+      "component": "lensguard:app/collector.py",
+      "project": "lensguard",
+      "line": 45,
+      "message": "Add an implementation or explain why this function is empty.",
+      "type": "CODE_SMELL",
+      "status": "OPEN"
+    },
+    {
+      "key": "demo-003",
+      "rule": "python:S1481",
+      "severity": "MINOR",
+      "component": "lensguard:app/main.py",
+      "project": "lensguard",
+      "line": 28,
+      "message": "Remove the unused local variable.",
+      "type": "CODE_SMELL",
+      "status": "OPEN"
+    }
+  ]
+}

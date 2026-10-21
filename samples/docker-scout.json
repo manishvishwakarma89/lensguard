@@ -1,0 +1,45 @@
+{
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Docker Scout",
+          "rules": [
+            {
+              "id": "DEMO-VULNERABILITY-001",
+              "shortDescription": {
+                "text": "Sample dependency vulnerability"
+              },
+              "properties": {
+                "security-severity": "8.1"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "DEMO-VULNERABILITY-001",
+          "level": "error",
+          "message": {
+            "text": "DEMO ONLY: Update the affected dependency to a patched version."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "requirements.txt"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
