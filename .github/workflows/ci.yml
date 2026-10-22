@@ -1,230 +1,261 @@
-name: LensGuard CI-CD
-
-on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [main]
-  workflow_dispatch:
-
+name: LensGuard CI
 permissions:
   contents: read
-
-# Allow an active deployment to finish before starting another.
 concurrency:
   group: lensguard-${{ github.ref }}
   cancel-in-progress: false
-
 env:
-  AWS_REGION: us-west-2
-  EB_APPLICATION: lensguard
-  EB_ENVIRONMENT: Lensguard-dev
-  IMAGE_REPOSITORY: manishvishwa801/lensguard
-
-  # Change to "." if Dockerfile is at the repository root.
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
+  EB_APPLICATION: ${{ vars.EB_APPLICATION || 'lensguard' }}
+  EB_ENVIRONMENT: ${{ vars.EB_ENVIRONMENT || 'Lensguard-dev' }}
+  IMAGE_REPOSITORY: ${{ vars.IMAGE_REPOSITORY || 'manishvishwa801/lensguard' }}
   BUILD_CONTEXT: ./backend
-
+  HEALTH_PATH: ${{ vars.HEALTH_PATH || '/api/health' }}
 jobs:
   build-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: pip
+        cache-dependency-path: backend/requirements.txt
+    - run: mkdir -p reports
+    - name: Install dependencies and run tests
+      working-directory: backend
+      env:
+        DATABASE_URL: sqlite://
+        COLLECTOR_ENABLED: 'false'
+      run: |
+        python -m pip install -r requirements.txt
+        python -m pytest --junitxml=../reports/pytest.xml
+    - name: Prepare image tag
+      run: |
+        echo "IMAGE_TAG=sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+        mkdir -p reports
 
-      - name: Prepare image tag
-        run: |
-          echo "IMAGE_TAG=sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
-          mkdir -p reports
+        echo "uri=$IMAGE_REPOSITORY:sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      id: image
+    - name: Build Docker image
+      run: |
+        docker build --platform linux/amd64 \
+          --tag "$IMAGE_REPOSITORY:$IMAGE_TAG" \
+          "$BUILD_CONTEXT"
+    - name: Scan source for vulnerabilities and misconfiguration
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        scan-type: fs
+        scan-ref: .
+        scanners: vuln,misconfig
+        format: json
+        output: reports/trivy-source.json
+        exit-code: '0'
+    - name: Scan container image
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        scan-type: image
+        image-ref: ${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
+        scanners: vuln
+        format: json
+        output: reports/trivy-image.json
+        exit-code: '0'
+    - name: Docker Hub login for Scout
+      if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.SCOUT_ENABLED == 'true'
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Docker Scout report
+      if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.SCOUT_ENABLED == 'true'
+      uses: docker/scout-action@v1
+      with:
+        command: cves
+        image: local://${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
+        sarif-file: reports/docker-scout.sarif.json
+        exit-code: false
+        github-token: ${{ github.token }}
+    - name: Enforce image security gate
+      shell: python
+      run: |
+        import json
+        import os
 
-      - name: Build Docker image
-        run: |
-          docker build \
-            --tag "$IMAGE_REPOSITORY:$IMAGE_TAG" \
-            "$BUILD_CONTEXT"
+        with open("reports/trivy-image.json") as handle:
+            report = json.load(handle)
 
-      - name: Scan source for vulnerabilities and misconfiguration
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,misconfig
-          format: json
-          output: reports/trivy-source.json
-          exit-code: "0"
+        vulnerabilities = [
+            vulnerability
+            for result in report.get("Results", [])
+            for vulnerability in result.get("Vulnerabilities", [])
+        ]
 
-      - name: Scan container image
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
-          scanners: vuln
-          format: json
-          output: reports/trivy-image.json
-          exit-code: "0"
+        critical = [
+            vulnerability
+            for vulnerability in vulnerabilities
+            if vulnerability.get("Severity") == "CRITICAL"
+        ]
 
-      - name: Enforce image security gate
-        shell: python
-        run: |
-          import json
-          import os
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+            summary.write("## LensGuard image scan\n\n")
+            summary.write(f"Total findings: {len(vulnerabilities)}\n\n")
+            summary.write(f"Critical findings: {len(critical)}\n")
 
-          with open("reports/trivy-image.json") as handle:
-              report = json.load(handle)
-
-          vulnerabilities = [
-              vulnerability
-              for result in report.get("Results", [])
-              for vulnerability in result.get("Vulnerabilities", [])
-          ]
-
-          critical = [
-              vulnerability
-              for vulnerability in vulnerabilities
-              if vulnerability.get("Severity") == "CRITICAL"
-          ]
-
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-              summary.write("## LensGuard image scan\n\n")
-              summary.write(f"Total findings: {len(vulnerabilities)}\n\n")
-              summary.write(f"Critical findings: {len(critical)}\n")
-
-          if critical:
-              raise SystemExit(
-                  "Deployment blocked: resolve critical image vulnerabilities."
-              )
-
-      - name: Upload scan reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-reports-${{ github.run_id }}
-          path: reports/
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Login to Docker Hub
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Push scanned image
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        run: docker push "$IMAGE_REPOSITORY:$IMAGE_TAG"
-
+        if critical:
+            raise SystemExit(
+                "Deployment blocked: resolve critical image vulnerabilities."
+            )
+    - name: Upload scan reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-reports-${{ github.run_id }}
+        path: reports/
+        if-no-files-found: warn
+        retention-days: 14
+    - name: Login to Docker Hub
+      if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Push scanned image
+      if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      run: docker push "$IMAGE_REPOSITORY:$IMAGE_TAG"
+    outputs:
+      image_uri: ${{ steps.image.outputs.uri }}
   deploy:
-    needs: build-scan
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-
     permissions:
       contents: read
       id-token: write
-
     steps:
-      - name: Authenticate to AWS using OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: lensguard-${{ github.run_id }}
+    - name: Validate deployment URL
+      env:
+        APP_BASE_URL: ${{ vars.APP_BASE_URL }}
+      run: |
+        [[ "$APP_BASE_URL" == https://* ]] || { echo "Set APP_BASE_URL to your HTTPS application URL"; exit 1; }
+    - name: Authenticate to AWS using OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN || secrets.AWS_ROLE_ARN }}
+        aws-region: ${{ env.AWS_REGION }}
+        role-session-name: lensguard-${{ github.run_id }}
+    - name: Install current AWS CLI
+      run: |
+        curl --fail --silent --show-error \
+          https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip \
+          -o /tmp/awscliv2.zip
+        unzip -q /tmp/awscliv2.zip -d /tmp/lensguard-aws
+        sudo /tmp/lensguard-aws/aws/install \
+          --bin-dir /usr/local/bin \
+          --install-dir /usr/local/aws-cli \
+          --update
+        /usr/local/bin/aws --version
+    - name: Verify target environment
+      env:
+        AWS_PAGER: ''
+      run: |
+        set -euo pipefail
+        aws elasticbeanstalk describe-environments --environment-names "$EB_ENVIRONMENT" --output json > /tmp/target-env.json
+        jq -e --arg app "$EB_APPLICATION" '.Environments | length == 1 and .[0].ApplicationName == $app and .[0].Status == "Ready" and .[0].Tier.Name == "Cluster"' /tmp/target-env.json >/dev/null || {
+          echo "Expected a Ready Cluster environment belonging to $EB_APPLICATION. Check EB_ENVIRONMENT and EB_APPLICATION."
+          exit 1
+        }
+    - name: Register and deploy container image
+      env:
+        AWS_PAGER: ''
+        IMAGE_URI: ${{ needs.build-scan.outputs.image_uri }}
+      run: |
+        set -euo pipefail
 
-      - name: Install current AWS CLI
-        run: |
-          curl --fail --silent --show-error \
-            https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip \
-            -o /tmp/awscliv2.zip
-          unzip -q /tmp/awscliv2.zip -d /tmp/lensguard-aws
-          sudo /tmp/lensguard-aws/aws/install \
-            --bin-dir /usr/local/bin \
-            --install-dir /usr/local/aws-cli \
-            --update
-          /usr/local/bin/aws --version
+        VERSION="gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        [[ "$IMAGE_URI" == "$IMAGE_REPOSITORY":sha-* ]] || { echo "Unexpected image URI"; exit 1; }
 
-      - name: Register and deploy container image
-        env:
-          AWS_PAGER: ""
-        run: |
-          set -euo pipefail
+        IMAGE_CONFIG=$(jq -n \
+          --arg uri "$IMAGE_URI" \
+          '{Source: {Uri: $uri}}')
 
-          VERSION="gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          IMAGE_TAG="sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        /usr/local/bin/aws elasticbeanstalk create-application-version \
+          --application-name "$EB_APPLICATION" \
+          --version-label "$VERSION" \
+          --description "GitHub commit $GITHUB_SHA" \
+          --image-configuration "$IMAGE_CONFIG" \
+          > /tmp/application-version.json
 
-          IMAGE_CONFIG=$(jq -n \
-            --arg uri "$IMAGE_REPOSITORY:$IMAGE_TAG" \
-            '{Source: {Uri: $uri}}')
+        /usr/local/bin/aws elasticbeanstalk update-environment \
+          --environment-name "$EB_ENVIRONMENT" \
+          --version-label "$VERSION" \
+          > /tmp/deployment-start.json
 
-          /usr/local/bin/aws elasticbeanstalk create-application-version \
-            --application-name "$EB_APPLICATION" \
-            --version-label "$VERSION" \
-            --description "GitHub commit $GITHUB_SHA" \
-            --image-configuration "$IMAGE_CONFIG" \
-            > /tmp/application-version.json
+        /usr/local/bin/aws elasticbeanstalk wait environment-updated \
+          --environment-names "$EB_ENVIRONMENT"
 
-          /usr/local/bin/aws elasticbeanstalk update-environment \
-            --environment-name "$EB_ENVIRONMENT" \
-            --version-label "$VERSION" \
-            > /tmp/deployment-start.json
+        ACTUAL_VERSION=$(/usr/local/bin/aws elasticbeanstalk describe-environments \
+          --environment-names "$EB_ENVIRONMENT" \
+          --query 'Environments[0].VersionLabel' \
+          --output text)
 
-          /usr/local/bin/aws elasticbeanstalk wait environment-updated \
-            --environment-names "$EB_ENVIRONMENT"
+        if [ "$ACTUAL_VERSION" != "$VERSION" ]; then
+          echo "Deployment failed or rolled back: expected $VERSION, got $ACTUAL_VERSION"
+          exit 1
+        fi
+    - name: Check public application health
+      env:
+        APP_BASE_URL: ${{ vars.APP_BASE_URL }}
+      run: |
+        set -euo pipefail
 
-          ACTUAL_VERSION=$(/usr/local/bin/aws elasticbeanstalk describe-environments \
-            --environment-names "$EB_ENVIRONMENT" \
-            --query 'Environments[0].VersionLabel' \
-            --output text)
+        if [[ "$APP_BASE_URL" != https://* ]]; then
+          echo "Set APP_BASE_URL to your application's HTTPS URL."
+          exit 1
+        fi
 
-          if [ "$ACTUAL_VERSION" != "$VERSION" ]; then
-            echo "Deployment failed or rolled back: expected $VERSION, got $ACTUAL_VERSION"
-            exit 1
-          fi
+        curl --fail --silent --show-error \
+          --retry 12 \
+          --retry-delay 10 \
+          --retry-all-errors \
+          --connect-timeout 10 \
+          --max-time 20 \
+          "${APP_BASE_URL%/}${HEALTH_PATH}"
+    - name: Collect deployment events
+      if: always()
+      env:
+        AWS_PAGER: ''
+      run: |
+        mkdir -p deployment-reports
 
-      - name: Check public application health
-        env:
-          APP_BASE_URL: ${{ vars.APP_BASE_URL }}
-        run: |
-          set -euo pipefail
+        /usr/local/bin/aws elasticbeanstalk describe-events \
+          --environment-name "$EB_ENVIRONMENT" \
+          --max-records 100 \
+          --output json \
+          > deployment-reports/beanstalk-events.json
 
-          if [[ "$APP_BASE_URL" != https://* ]]; then
-            echo "Set APP_BASE_URL to your application's HTTPS URL."
-            exit 1
-          fi
-
-          curl --fail --silent --show-error \
-            --retry 12 \
-            --retry-delay 10 \
-            --retry-all-errors \
-            --connect-timeout 10 \
-            --max-time 20 \
-            "${APP_BASE_URL%/}/healthz"
-
-      - name: Collect deployment events
-        if: always()
-        env:
-          AWS_PAGER: ""
-        run: |
-          mkdir -p deployment-reports
-
-          /usr/local/bin/aws elasticbeanstalk describe-events \
-            --environment-name "$EB_ENVIRONMENT" \
-            --max-records 100 \
-            --output json \
-            > deployment-reports/beanstalk-events.json
-
-          /usr/local/bin/aws elasticbeanstalk describe-environments \
-            --environment-names "$EB_ENVIRONMENT" \
-            --query 'Environments[].{Name:EnvironmentName,Status:Status,Health:Health,Version:VersionLabel,Domain:CNAME}' \
-            --output json \
-            > deployment-reports/environment-status.json
-
-      - name: Upload deployment evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-events-${{ github.run_id }}
-          path: deployment-reports/
-          if-no-files-found: warn
-          retention-days: 14
+        /usr/local/bin/aws elasticbeanstalk describe-environments \
+          --environment-names "$EB_ENVIRONMENT" \
+          --query 'Environments[].{Name:EnvironmentName,Status:Status,Health:Health,Version:VersionLabel,Domain:CNAME}' \
+          --output json \
+          > deployment-reports/environment-status.json
+    - name: Upload deployment evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-events-${{ github.run_id }}
+        path: deployment-reports/
+        if-no-files-found: warn
+        retention-days: 14
+    needs: build-scan
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    concurrency:
+      group: lensguard-production
+      cancel-in-progress: false
+'on':
+  pull_request:
+    branches:
+    - main
+  push:
+    branches:
+    - main
+  workflow_dispatch: null
