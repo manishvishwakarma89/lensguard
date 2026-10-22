@@ -9,7 +9,6 @@ env:
   EB_APPLICATION: ${{ vars.EB_APPLICATION || 'lensguard' }}
   EB_ENVIRONMENT: ${{ vars.EB_ENVIRONMENT || 'Lensguard-dev' }}
   IMAGE_REPOSITORY: ${{ vars.IMAGE_REPOSITORY || 'manishvishwa801/lensguard' }}
-  IMAGE_TAG: ${{ vars.IMAGE_TAG || 'latest' }}
   BUILD_CONTEXT: ./backend
   HEALTH_PATH: ${{ vars.HEALTH_PATH || '/api/health' }}
 jobs:
@@ -127,131 +126,15 @@ jobs:
     outputs:
       image_uri: ${{ steps.image.outputs.uri }}
   deploy:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    needs: build-scan
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     permissions:
       contents: read
       id-token: write
-    steps:
-    - name: Validate deployment URL
-      env:
-        APP_BASE_URL: ${{ vars.APP_BASE_URL }}
-      run: |
-        [[ "$APP_BASE_URL" == https://* ]] || { echo "Set APP_BASE_URL to your HTTPS application URL"; exit 1; }
-    - name: Authenticate to AWS using OIDC
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN || secrets.AWS_ROLE_ARN }}
-        aws-region: ${{ env.AWS_REGION }}
-        role-session-name: lensguard-${{ github.run_id }}
-    - name: Install current AWS CLI
-      run: |
-        curl --fail --silent --show-error \
-          https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip \
-          -o /tmp/awscliv2.zip
-        unzip -q /tmp/awscliv2.zip -d /tmp/lensguard-aws
-        sudo /tmp/lensguard-aws/aws/install \
-          --bin-dir /usr/local/bin \
-          --install-dir /usr/local/aws-cli \
-          --update
-        /usr/local/bin/aws --version
-    - name: Verify target environment
-      env:
-        AWS_PAGER: ''
-      run: |
-        set -euo pipefail
-        aws elasticbeanstalk describe-environments --environment-names "$EB_ENVIRONMENT" --output json > /tmp/target-env.json
-        jq -e --arg app "$EB_APPLICATION" '.Environments | length == 1 and .[0].ApplicationName == $app and .[0].Status == "Ready" and .[0].Tier.Name == "Cluster"' /tmp/target-env.json >/dev/null || {
-          echo "Expected a Ready Cluster environment belonging to $EB_APPLICATION. Check EB_ENVIRONMENT and EB_APPLICATION."
-          exit 1
-        }
-    - name: Register and deploy container image
-      env:
-        AWS_PAGER: ''
-        IMAGE_URI: ${{ needs.build-scan.outputs.image_uri }}
-      run: |
-        set -euo pipefail
-
-        VERSION="gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-        [[ "$IMAGE_URI" == "$IMAGE_REPOSITORY":sha-* ]] || { echo "Unexpected image URI"; exit 1; }
-
-        IMAGE_CONFIG=$(jq -n \
-          --arg uri "$IMAGE_URI" \
-          '{Source: {Uri: $uri}}')
-
-        /usr/local/bin/aws elasticbeanstalk create-application-version \
-          --application-name "$EB_APPLICATION" \
-          --version-label "$VERSION" \
-          --description "GitHub commit $GITHUB_SHA" \
-          --image-configuration "$IMAGE_CONFIG" \
-          > /tmp/application-version.json
-
-        /usr/local/bin/aws elasticbeanstalk update-environment \
-          --environment-name "$EB_ENVIRONMENT" \
-          --version-label "$VERSION" \
-          > /tmp/deployment-start.json
-
-        /usr/local/bin/aws elasticbeanstalk wait environment-updated \
-          --environment-names "$EB_ENVIRONMENT"
-
-        ACTUAL_VERSION=$(/usr/local/bin/aws elasticbeanstalk describe-environments \
-          --environment-names "$EB_ENVIRONMENT" \
-          --query 'Environments[0].VersionLabel' \
-          --output text)
-
-        if [ "$ACTUAL_VERSION" != "$VERSION" ]; then
-          echo "Deployment failed or rolled back: expected $VERSION, got $ACTUAL_VERSION"
-          exit 1
-        fi
-    - name: Check public application health
-      env:
-        APP_BASE_URL: ${{ vars.APP_BASE_URL }}
-      run: |
-        set -euo pipefail
-
-        if [[ "$APP_BASE_URL" != https://* ]]; then
-          echo "Set APP_BASE_URL to your application's HTTPS URL."
-          exit 1
-        fi
-
-        curl --fail --silent --show-error \
-          --retry 12 \
-          --retry-delay 10 \
-          --retry-all-errors \
-          --connect-timeout 10 \
-          --max-time 20 \
-          "${APP_BASE_URL%/}${HEALTH_PATH}"
-    - name: Collect deployment events
-      if: always()
-      env:
-        AWS_PAGER: ''
-      run: |
-        mkdir -p deployment-reports
-
-        /usr/local/bin/aws elasticbeanstalk describe-events \
-          --environment-name "$EB_ENVIRONMENT" \
-          --max-records 100 \
-          --output json \
-          > deployment-reports/beanstalk-events.json
-
-        /usr/local/bin/aws elasticbeanstalk describe-environments \
-          --environment-names "$EB_ENVIRONMENT" \
-          --query 'Environments[].{Name:EnvironmentName,Status:Status,Health:Health,Version:VersionLabel,Domain:CNAME}' \
-          --output json \
-          > deployment-reports/environment-status.json
-    - name: Upload deployment evidence
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: deployment-events-${{ github.run_id }}
-        path: deployment-reports/
-        if-no-files-found: warn
-        retention-days: 14
-    needs: build-scan
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    concurrency:
-      group: lensguard-production
-      cancel-in-progress: false
+    uses: ./.github/workflows/deploy.yml
+    with:
+      image_uri: ${{ needs.build-scan.outputs.image_uri }}
+    secrets: inherit
 'on':
   pull_request:
     branches:
