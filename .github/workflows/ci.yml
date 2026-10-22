@@ -9,6 +9,7 @@ env:
   EB_APPLICATION: ${{ vars.EB_APPLICATION || 'lensguard' }}
   EB_ENVIRONMENT: ${{ vars.EB_ENVIRONMENT || 'Lensguard-dev' }}
   IMAGE_REPOSITORY: ${{ vars.IMAGE_REPOSITORY || 'manishvishwa801/lensguard' }}
+  IMAGE_TAG: ${{ vars.IMAGE_TAG || 'latest' }}
   BUILD_CONTEXT: ./backend
   HEALTH_PATH: ${{ vars.HEALTH_PATH || '/api/health' }}
 jobs:
